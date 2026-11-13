@@ -1,0 +1,23 @@
+[
+  {
+    "query_id": "Q01",
+    "query_type": "lexical",
+    "query": "What is the default value of maxUnavailable in RollingUpdateDeployment?",
+    "target_doc": "kubernetes_api_spec.md",
+    "target_section": "RollingUpdateDeployment",
+    "target_spans": [
+      "maxUnavailable",
+      "25%"
+    ]
+  },
+  {
+    "query_id": "Q02",
+    "query_type": "lexical",
+    "query": "Error: ECONNRESET in pooled connection",
+    "target_doc": "postgres_connection_pooling.md",
+    "target_section": "ECONNRESET",
+    "target_spans": [
+      "ECONNRESET"
+    ]
+  }
+]

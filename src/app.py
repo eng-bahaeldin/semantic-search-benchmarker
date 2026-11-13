@@ -1,296 +1,184 @@
-from __future__ import annotations
+"""src/app.py - SearchWorkbench: Interactive Search Comparator & IR Benchmark Dashboard."""
 
-import os
-import re
 import sys
 from pathlib import Path
-from typing import Dict, List
 
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-from dotenv import load_dotenv
-
-# Ensure project root is on sys.path when invoked via `streamlit run src/app.py`
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.benchmarker import BenchmarkSummary, run_full_benchmark
-from src.indexer import SearchResult, tokenize_for_bm25
-from src.search import SearchEngine, StrategyName, build_all_engines
+import pandas as pd
+import streamlit as st
 
-load_dotenv()
+from src.benchmarker import RetrievalBenchmarker
+from src.chunking import FixedSizeChunker, StructureAwareChunker
+from src.indexer import BM25SparseIndex, DenseVectorIndex, get_shared_encoder
+from src.search import UnifiedSearchEngine
 
 st.set_page_config(
-    page_title="SearchWorkbench | Semantic vs. Lexical IR Benchmarker",
-    page_icon="🔍",
+    page_title="SearchWorkbench | Semantic Search & IR Benchmarker",
     layout="wide",
 )
 
 
-def get_api_key() -> str | None:
-    """Safely checks Streamlit secrets first, then environment variables."""
-    try:
-        if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        pass
-    return os.getenv("OPENAI_API_KEY")
+@st.cache_resource(show_spinner="Indexing technical documentation corpus across chunking strategies...")
+def load_search_engines() -> dict[str, UnifiedSearchEngine]:
+    encoder = get_shared_encoder("all-MiniLM-L6-v2")
+
+    chunks_struct = StructureAwareChunker().chunk_corpus("corpus")
+    chunks_256 = FixedSizeChunker(chunk_size=256, chunk_overlap=32).chunk_corpus("corpus")
+    chunks_1024 = FixedSizeChunker(chunk_size=1024, chunk_overlap=128).chunk_corpus("corpus")
+
+    return {
+        "Structure-Aware (Markdown Headers)": UnifiedSearchEngine(
+            bm25_index=BM25SparseIndex(chunks_struct),
+            dense_index=DenseVectorIndex(chunks_struct, collection_prefix="ui_struct", encoder=encoder),
+        ),
+        "Fixed-Size (256 Tokens / 32 Overlap)": UnifiedSearchEngine(
+            bm25_index=BM25SparseIndex(chunks_256),
+            dense_index=DenseVectorIndex(chunks_256, collection_prefix="ui_256", encoder=encoder),
+        ),
+        "Fixed-Size (1024 Tokens / 128 Overlap)": UnifiedSearchEngine(
+            bm25_index=BM25SparseIndex(chunks_1024),
+            dense_index=DenseVectorIndex(chunks_1024, collection_prefix="ui_1024", encoder=encoder),
+        ),
+    }
 
 
-@st.cache_resource(show_spinner="Building BM25 & Dense Vector indices across chunking strategies...")
-def load_search_engines(backend: str, api_key: str | None) -> Dict[StrategyName, SearchEngine]:
-    return build_all_engines(
-        backend=backend,
-        openai_api_key=api_key,
-        corpus_dir=str(ROOT_DIR / "corpus"),
-    )
+engines = load_search_engines()
 
-
-def highlight_matching_terms(text: str, query: str) -> str:
-    """Wraps exact query tokens found in the chunk text in bold markdown markers."""
-    tokens = sorted(set(tokenize_for_bm25(query)), key=len, reverse=True)
-    highlighted = text
-    for tok in tokens:
-        if len(tok) < 3:
-            continue
-        pattern = re.compile(rf"(?i)\b({re.escape(tok)})\b")
-        highlighted = pattern.sub(r"**[\1]**", highlighted)
-    return highlighted
-
-
-def render_result_card(res: SearchResult, query: str) -> None:
-    score_label = "Cosine Similarity" if res.engine == "dense" else "BM25 Score"
-    header_info = res.metadata.get("header_hierarchy", "N/A")
-    token_count = res.metadata.get("token_count", "?")
-    lines_span = f"L{res.metadata.get('start_line', '?')}-L{res.metadata.get('end_line', '?')}"
-
-    with st.container(border=True):
-        top_col1, top_col2 = st.columns([3, 1])
-        with top_col1:
-            st.markdown(f"**Rank #{res.rank}** — `{res.parent_doc}` ({lines_span})")
-            st.caption(f"Section: {header_info} | Tokens: {token_count}")
-        with top_col2:
-            st.metric(label=score_label, value=f"{res.score:.4f}")
-
-        st.markdown(highlight_matching_terms(res.content, query))
-
-
-# --- SIDEBAR CONFIGURATION ---
-with st.sidebar:
-    st.title("⚙️ SearchWorkbench")
-    st.caption("Empirical IR & Chunking Evaluation Harness")
-
-    openai_key = get_api_key()
-    backend_options = ["local (ONNX all-MiniLM-L6-v2)"]
-    if openai_key and not openai_key.startswith("your_"):
-        backend_options.append("openai (text-embedding-3-small)")
-
-    selected_backend_label = st.selectbox("Embedding Backend", options=backend_options)
-    backend_key = "openai" if selected_backend_label.startswith("openai") else "local"
-
-    engines = load_search_engines(backend_key, openai_key)
-
-    st.divider()
-    st.subheader("Corpus Index Stats")
-    for strat_key, eng in engines.items():
-        st.write(f"• **{strat_key}**: `{len(eng.chunks)}` chunks")
-
-    st.divider()
-    top_k = st.slider("Top-K Cutoff (K)", min_value=1, max_value=10, value=5)
-
-
-# --- MAIN HEADER ---
-st.title("🔍 Semantic Document Search Engine & Empirical Benchmarker")
-st.markdown(
-    "Compare **Sparse Lexical Retrieval (BM25)** against **Dense Vector Search (ChromaDB Cosine)** "
-    "across **Fixed-Token** and **Structure-Aware Markdown Chunking** strategies."
+st.title("SearchWorkbench: Semantic Search Engine & Empirical IR Benchmarker")
+st.caption(
+    "Comparing Sparse Lexical Retrieval (BM25Okapi) vs. Dense Vector Search (all-MiniLM-L6-v2 + ChromaDB) across Fixed & Structure-Aware Chunking"
 )
 
-tab_search, tab_benchmark = st.tabs(
-    ["⚖️ Live Search Comparator", "📊 Benchmark & Failure Analysis Dashboard"]
+tab_compare, tab_benchmark = st.tabs(
+    ["1. Live Search Comparator (BM25 vs. Dense)", "2. Benchmark & Evaluation Dashboard"]
 )
 
-# ==============================================================================
-# TAB 1: LIVE SEARCH COMPARATOR
-# ==============================================================================
-with tab_search:
-    st.subheader("Side-by-Side Lexical vs. Dense Retrieval")
-
-    preset_col1, preset_col2, preset_col3 = st.columns(3)
-    if "live_query" not in st.session_state:
-        st.session_state.live_query = "What is the default value of maxUnavailable in RollingUpdateDeployment?"
-
-    with preset_col1:
-        if st.button("🎯 Lexical Preset: maxUnavailable", use_container_width=True):
-            st.session_state.live_query = "What is the default value of maxUnavailable in RollingUpdateDeployment?"
-    with preset_col2:
-        if st.button("🎯 Lexical Preset: ECONNRESET", use_container_width=True):
-            st.session_state.live_query = "Error: ECONNRESET in pooled connection"
-    with preset_col3:
-        if st.button("🧠 Semantic Preset: Zero-Downtime", use_container_width=True):
-            st.session_state.live_query = "How do I ensure zero-downtime rolling upgrades during heavy traffic?"
-
-    q_col, strat_col = st.columns([3, 1])
-    with q_col:
-        user_query = st.text_input(
-            "Enter a technical search query:",
-            key="live_query",
-            placeholder="e.g., Preventing network socket starvation in client pools",
-        )
-    with strat_col:
-        active_strategy: StrategyName = st.selectbox(
-            "Chunking Strategy",
-            options=["structure_aware", "fixed_256", "fixed_1024"],
+with tab_compare:
+    ctrl_col1, ctrl_col2 = st.columns([2, 1])
+    with ctrl_col1:
+        selected_strategy = st.selectbox(
+            "Chunking & Indexing Strategy:",
+            options=list(engines.keys()),
             index=0,
-        )  # type: ignore[assignment]
+        )
+    with ctrl_col2:
+        top_k = st.slider("Top-K Results (K):", min_value=1, max_value=10, value=5)
 
-    if user_query.strip():
-        active_engine = engines[active_strategy]
-        bm25_results, bm25_ms = active_engine.query_bm25(user_query, top_k=top_k)
-        dense_results, dense_ms = active_engine.query_dense(user_query, top_k=top_k)
+    st.markdown("**Quick Comparison Presets:**")
+    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+    preset_q = ""
+    with p_col1:
+        if st.button("Lexical: maxUnavailable Default", width="stretch"):
+            preset_q = "What is the default value of maxUnavailable in RollingUpdateDeployment?"
+    with p_col2:
+        if st.button("Lexical: ECONNRESET Pool Error", width="stretch"):
+            preset_q = "Error: ECONNRESET in pooled connection"
+    with p_col3:
+        if st.button("Conceptual: Zero-Downtime Rollout", width="stretch"):
+            preset_q = "How do I ensure zero-downtime rolling upgrades during heavy traffic?"
+    with p_col4:
+        if st.button("Conceptual: Socket Starvation", width="stretch"):
+            preset_q = "Preventing network socket starvation in client database pools"
+
+    with st.form("live_search_form", clear_on_submit=False):
+        query_input = st.text_input(
+            "Enter a technical search query (exact identifier or conceptual question):",
+            value=preset_q,
+            placeholder="e.g., CUSTOM_CONFIG_FLAG_XYZ or How does Envoy rotate mTLS certificates?",
+        )
+        run_search = st.form_submit_button("Compare BM25 vs. Dense Retrieval", type="primary")
+
+    if run_search and query_input.strip():
+        active_engine = engines[selected_strategy]
+        bm25_hits, bm25_ms = active_engine.search_bm25(query_input, top_k=top_k)
+        dense_hits, dense_ms = active_engine.search_dense(query_input, top_k=top_k)
 
         left_col, right_col = st.columns(2)
+
         with left_col:
-            st.markdown(f"### 🔤 BM25 Lexical Search (`{bm25_ms:.2f} ms`)")
-            if not bm25_results or bm25_results[0].score == 0.0:
-                st.warning("No exact lexical token matches found in corpus.")
-            for res in bm25_results:
-                render_result_card(res, user_query)
+            st.subheader("Sparse Lexical Search (BM25Okapi)")
+            st.metric("Query Latency (ms)", f"{bm25_ms:.2f} ms", delta=f"{len(bm25_hits)} hits")
+            if not bm25_hits:
+                st.warning("Zero lexical token matches found in corpus.")
+            for hit in bm25_hits:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**Rank #{hit.rank}** | BM25 Score: **`{hit.score:.4f}`** | `{hit.chunk.parent_doc}`"
+                    )
+                    st.caption(
+                        f"Section: {hit.chunk.metadata.get('header_hierarchy')} | "
+                        f"Tokens: {hit.chunk.metadata.get('token_count')} | "
+                        f"Matched Terms: `{ ', '.join(hit.matched_terms) or 'none' }`"
+                    )
+                    st.markdown(hit.chunk.content[:420] + ("..." if len(hit.chunk.content) > 420 else ""))
 
         with right_col:
-            st.markdown(f"### 🧬 Dense Vector Search (`{dense_ms:.2f} ms`)")
-            for res in dense_results:
-                render_result_card(res, user_query)
+            st.subheader("Dense Vector Search (Cosine Similarity)")
+            st.metric("Query Latency (ms)", f"{dense_ms:.2f} ms", delta=f"{len(dense_hits)} hits")
+            for hit in dense_hits:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**Rank #{hit.rank}** | Cosine Similarity: **`{hit.score:.4f}`** | `{hit.chunk.parent_doc}`"
+                    )
+                    st.caption(
+                        f"Section: {hit.chunk.metadata.get('header_hierarchy')} | "
+                        f"Tokens: {hit.chunk.metadata.get('token_count')} | "
+                        f"Lexical Overlap: `{ ', '.join(hit.matched_terms) or 'semantic match only' }`"
+                    )
+                    st.markdown(hit.chunk.content[:420] + ("..." if len(hit.chunk.content) > 420 else ""))
 
-
-# ==============================================================================
-# TAB 2: BENCHMARK & EVALUATION DASHBOARD
-# ==============================================================================
 with tab_benchmark:
-    st.subheader("Automated Retrieval Evaluation Harness (`data/eval_queries.json`)")
-    st.write(
-        "Evaluates **18 curated technical queries** (9 exact-identifier lexical queries + "
-        "9 paraphrased semantic queries) across all 4 required retrieval configurations."
+    st.markdown(
+        "Evaluates **labeled technical queries** (`data/eval_queries.json`) "
+        "across **BM25 Baseline**, **Dense Fixed-256**, **Dense Fixed-1024**, and **Dense Structure-Aware**."
     )
 
-    run_btn = st.button("🚀 Run Full Benchmark Suite", type="primary")
+    if "benchmark_results" not in st.session_state:
+        st.session_state.benchmark_results = None
 
-    if run_btn or "benchmark_results" not in st.session_state:
-        with st.spinner("Running evaluation across all 4 configurations..."):
-            st.session_state.benchmark_results = run_full_benchmark(
-                engines=engines,
-                eval_path=ROOT_DIR / "data" / "eval_queries.json",
-                k=top_k,
-            )
-            st.session_state.benchmark_k = top_k
+    if st.button("Run Benchmark Suite (Ground-Truth Queries)", type="primary"):
+        with st.spinner("Running 4-way empirical IR benchmark across Hit Rate@K, Recall@K, MRR@K, and Latency..."):
+            benchmarker = RetrievalBenchmarker(corpus_dir="corpus", eval_path="data/eval_queries.json")
+            summary_rows, failure_cases = benchmarker.run_all_benchmarks()
+            st.session_state.benchmark_results = (summary_rows, failure_cases)
 
-    # Re-run automatically if the user changed Top-K slider
-    if st.session_state.get("benchmark_k") != top_k:
-        st.session_state.benchmark_results = run_full_benchmark(
-            engines=engines,
-            eval_path=ROOT_DIR / "data" / "eval_queries.json",
-            k=top_k,
+    if st.session_state.benchmark_results is not None:
+        summary_rows, failure_cases = st.session_state.benchmark_results
+        df = pd.DataFrame([row.model_dump() for row in summary_rows])
+
+        st.subheader("Empirical Retrieval Metrics Comparison")
+        display_df = df.rename(
+            columns={
+                "configuration": "Configuration",
+                "chunk_count": "Total Chunks",
+                "hit_rate_at_3": "Hit Rate@3",
+                "hit_rate_at_5": "Hit Rate@5",
+                "recall_at_5": "Recall@5",
+                "mrr_at_5": "MRR@5",
+                "avg_latency_ms": "Avg Latency (ms)",
+                "p50_latency_ms": "p50 Latency (ms)",
+                "p95_latency_ms": "p95 Latency (ms)",
+            }
         )
-        st.session_state.benchmark_k = top_k
+        st.dataframe(display_df, width="stretch", hide_index=True)
 
-    summaries: List[BenchmarkSummary] = st.session_state.benchmark_results
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.markdown("#### Ranking Quality: Hit Rate@5 vs. MRR@5")
+            quality_chart = display_df.set_index("Configuration")[["Hit Rate@3", "Hit Rate@5", "MRR@5"]]
+            st.bar_chart(quality_chart)
 
-    # Summary Dataframe
-    summary_rows = [
-        {
-            "Configuration": s.configuration,
-            "Chunk Count": s.total_chunks,
-            f"Hit Rate@{top_k}": s.hit_rate,
-            f"Recall@{top_k}": s.recall,
-            f"MRR@{top_k}": s.mrr,
-            "Avg Latency (ms)": s.avg_latency_ms,
-            "p50 Latency (ms)": s.p50_latency_ms,
-            "p95 Latency (ms)": s.p95_latency_ms,
-        }
-        for s in summaries
-    ]
-    df_summary = pd.DataFrame(summary_rows)
-    st.dataframe(df_summary, use_container_width=True, hide_index=True)
+        with chart_col2:
+            st.markdown("#### Query Execution Latency: p50 vs. p95 (ms)")
+            latency_chart = display_df.set_index("Configuration")[["p50 Latency (ms)", "p95 Latency (ms)"]]
+            st.bar_chart(latency_chart)
 
-    # Bar Charts: Accuracy Metrics & Latency
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        df_melted = df_summary.melt(
-            id_vars=["Configuration"],
-            value_vars=[f"Hit Rate@{top_k}", f"Recall@{top_k}", f"MRR@{top_k}"],
-            var_name="Metric",
-            value_name="Score",
-        )
-        fig_metrics = px.bar(
-            df_melted,
-            x="Configuration",
-            y="Score",
-            color="Metric",
-            barmode="group",
-            title=f"Retrieval Quality Comparison (K={top_k})",
-            range_y=[0, 1.05],
-        )
-        fig_metrics.update_layout(xaxis_tickangle=-15)
-        st.plotly_chart(fig_metrics, use_container_width=True)
-
-    with chart_col2:
-        df_lat = df_summary.melt(
-            id_vars=["Configuration"],
-            value_vars=["p50 Latency (ms)", "p95 Latency (ms)"],
-            var_name="Percentile",
-            value_name="Latency (ms)",
-        )
-        fig_lat = px.bar(
-            df_lat,
-            x="Configuration",
-            y="Latency (ms)",
-            color="Percentile",
-            barmode="group",
-            title="Query Execution Latency (ms)",
-        )
-        fig_lat.update_layout(xaxis_tickangle=-15)
-        st.plotly_chart(fig_lat, use_container_width=True)
-
-    # --- FAILURE ANALYSIS PANEL ---
-    st.divider()
-    st.subheader("🔬 Failure Analysis: Where BM25 Beats Dense Search (and Vice Versa)")
-
-    bm25_struct = summaries[0].per_query
-    dense_struct = summaries[3].per_query
-
-    bm25_wins = []
-    dense_wins = []
-    for b_item, d_item in zip(bm25_struct, dense_struct):
-        if b_item.reciprocal_rank > d_item.reciprocal_rank:
-            bm25_wins.append((b_item, d_item))
-        elif d_item.reciprocal_rank > b_item.reciprocal_rank:
-            dense_wins.append((b_item, d_item))
-
-    fa_col1, fa_col2 = st.columns(2)
-    with fa_col1:
-        st.markdown(f"#### 🔤 BM25 Outperformed Dense ({len(bm25_wins)} queries)")
-        st.caption(
-            "Why: Exact configuration flags, sysctl keys, and error constants carry high IDF weight "
-            "in BM25, whereas dense embeddings smooth specific tokens into broader semantic neighborhoods."
-        )
-        if not bm25_wins:
-            st.info("Both engines tied on all exact-keyword queries at this K.")
-        for b_q, d_q in bm25_wins:
-            with st.expander(f"[{b_q.query_id}] {b_q.query}"):
-                st.write(f"**Query Type:** `{b_q.query_type}` | **Target:** `{b_q.expected_section}`")
-                st.write(f"**BM25 RR@{top_k}:** `{b_q.reciprocal_rank:.2f}` vs. **Dense RR@{top_k}:** `{d_q.reciprocal_rank:.2f}`")
-
-    with fa_col2:
-        st.markdown(f"#### 🧬 Dense Outperformed BM25 ({len(dense_wins)} queries)")
-        st.caption(
-            "Why: Conceptual queries using synonyms (e.g., 'thundering herd', 'zero-downtime') share "
-            "few exact surface tokens with the target spec, causing BM25 term-frequency starvation."
-        )
-        if not dense_wins:
-            st.info("Both engines tied on all semantic queries at this K.")
-        for b_q, d_q in dense_wins:
-            with st.expander(f"[{d_q.query_id}] {d_q.query}"):
-                st.write(f"**Query Type:** `{d_q.query_type}` | **Target:** `{d_q.expected_section}`")
-                st.write(f"**Dense RR@{top_k}:** `{d_q.reciprocal_rank:.2f}` vs. **BM25 RR@{top_k}:** `{b_q.reciprocal_rank:.2f}`")
+        st.divider()
+        st.subheader("Head-to-Head Failure & Trade-Off Analysis (BM25 vs. Structure-Aware Dense)")
+        if failure_cases:
+            st.dataframe(pd.DataFrame(failure_cases), width="stretch", hide_index=True)
+        else:
+            st.success("Both engines tied across every query in the evaluation dataset.")
