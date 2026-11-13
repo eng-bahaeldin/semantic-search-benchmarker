@@ -1,13 +1,7 @@
-# Secrets & Environment
-.env
 .venv/
-venv/
-
-# Local Vector Stores & Caches
-.chroma_db/
-chroma_data/
-*.sqlite3
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.chroma_db/
+.env
 .DS_Store
