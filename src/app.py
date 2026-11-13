@@ -1,6 +1,5 @@
 """src/app.py - SearchWorkbench: Interactive Search Comparator & IR Benchmark Dashboard."""
 
-import os
 import sys
 from pathlib import Path
 
@@ -57,9 +56,6 @@ tab_compare, tab_benchmark = st.tabs(
     ["1. Live Search Comparator (BM25 vs. Dense)", "2. Benchmark & Evaluation Dashboard"]
 )
 
-# ---------------------------------------------------------------------------
-# TAB 1: LIVE SEARCH COMPARATOR
-# ---------------------------------------------------------------------------
 with tab_compare:
     ctrl_col1, ctrl_col2 = st.columns([2, 1])
     with ctrl_col1:
@@ -115,7 +111,7 @@ with tab_compare:
                     st.caption(
                         f"Section: {hit.chunk.metadata.get('header_hierarchy')} | "
                         f"Tokens: {hit.chunk.metadata.get('token_count')} | "
-                        f"Matched Terms: `{', '.join(hit.matched_terms) or 'none'}`"
+                        f"Matched Terms: `{ ', '.join(hit.matched_terms) or 'none' }`"
                     )
                     st.markdown(hit.chunk.content[:420] + ("..." if len(hit.chunk.content) > 420 else ""))
 
@@ -130,23 +126,20 @@ with tab_compare:
                     st.caption(
                         f"Section: {hit.chunk.metadata.get('header_hierarchy')} | "
                         f"Tokens: {hit.chunk.metadata.get('token_count')} | "
-                        f"Lexical Overlap: `{', '.join(hit.matched_terms) or 'semantic match only'}`"
+                        f"Lexical Overlap: `{ ', '.join(hit.matched_terms) or 'semantic match only' }`"
                     )
                     st.markdown(hit.chunk.content[:420] + ("..." if len(hit.chunk.content) > 420 else ""))
 
-# ---------------------------------------------------------------------------
-# TAB 2: BENCHMARK & EVALUATION DASHBOARD
-# ---------------------------------------------------------------------------
 with tab_benchmark:
     st.markdown(
-        "Evaluates **20 labeled technical queries** (`data/eval_queries.json` — 10 exact-lexical, 10 paraphrased-conceptual) "
+        "Evaluates **labeled technical queries** (`data/eval_queries.json`) "
         "across **BM25 Baseline**, **Dense Fixed-256**, **Dense Fixed-1024**, and **Dense Structure-Aware**."
     )
 
     if "benchmark_results" not in st.session_state:
         st.session_state.benchmark_results = None
 
-    if st.button("Run Benchmark Suite (20 Ground-Truth Queries)", type="primary"):
+    if st.button("Run Benchmark Suite (Ground-Truth Queries)", type="primary"):
         with st.spinner("Running 4-way empirical IR benchmark across Hit Rate@K, Recall@K, MRR@K, and Latency..."):
             benchmarker = RetrievalBenchmarker(corpus_dir="corpus", eval_path="data/eval_queries.json")
             summary_rows, failure_cases = benchmarker.run_all_benchmarks()
